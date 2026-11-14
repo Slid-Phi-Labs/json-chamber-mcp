@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * json-chamber-mcp — Chamber MCP Server
- * Cloak needs a live license (24h try, then $9/mo · $99/yr).
+ * Cloak needs a live license (24h try, then $20/mo · $200/yr).
  * Open is both keys, no extra payment. Ciphertext does not expire.
  */
 
@@ -52,7 +52,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "chamber_info",
-      description: "Package info, cloak license ($9/mo · $99/yr), open is keys-only.",
+      description: "Package info, cloak license ($20/mo · $200/yr), open is keys-only.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -146,8 +146,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             product: "json-chamber",
             lab: "Slid Phi Labs",
             pricing: {
-              cloak_month: "$9 / month",
-              cloak_year: "$99 / year",
+              cloak_month: "$20 / month",
+              cloak_year: "$200 / year",
               open: "keys only — no extra payment",
             },
             trial: "24 hours of cloak from first run. Open stays keys-only after that.",

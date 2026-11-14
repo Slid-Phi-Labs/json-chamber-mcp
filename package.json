@@ -1,7 +1,7 @@
 {
   "name": "json-chamber-mcp",
-  "version": "1.2.1",
-  "description": "Chamber MCP \u2014 JSON seal/open. Cloak needs a live license ($9/mo \u00b7 $99/yr). Open is keys-only.",
+  "version": "1.2.2",
+  "description": "Chamber seals JSON with two keys. A license to seal new secrets is $20 a month or $200 a year. Opening an already-sealed file takes both keys and costs nothing extra.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {

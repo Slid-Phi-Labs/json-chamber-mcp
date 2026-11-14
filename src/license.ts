@@ -1,6 +1,6 @@
 /**
  * Cloak license for json-chamber-mcp.
- * 24h try, then $9/mo · $99/yr. Open does not call this module.
+ * 24h try, then $20/mo · $200/yr. Open does not call this module.
  * Unlock via VERIFIEDDR_API_KEY containing purchased/pro/live_
  */
 
@@ -148,7 +148,7 @@ export class LicenseManager {
       return {
         alive: false,
         status: "dead",
-        reason: `Chamber cloak try ended. Seal is off until a cloak license is live ($9/mo · $99/yr). Open of already-sealed blobs is keys-only. ${PURCHASE_URL}`,
+        reason: `Chamber cloak try ended. Seal is off until a cloak license is live ($20/mo · $200/yr). Open of already-sealed blobs is keys-only. ${PURCHASE_URL}`,
         price: PRICE_USD,
         purchase_url: PURCHASE_URL,
       };
@@ -173,7 +173,7 @@ export class LicenseManager {
           "╔══════════════════════════════════════════════════════╗",
           "║  CHAMBER CLOAK LICENSE OFF                           ║",
           `║  ${s.reason ?? "Cloak license expired"}`,
-          `║  $9/mo · $99/yr → ${PURCHASE_URL}`,
+          `║  $20/mo · $200/yr → ${PURCHASE_URL}`,
           "║  Open of sealed blobs still works with both keys.    ║",
           "║  Set VERIFIEDDR_API_KEY=vdr_purchased_...            ║",
           "╚══════════════════════════════════════════════════════╝",
