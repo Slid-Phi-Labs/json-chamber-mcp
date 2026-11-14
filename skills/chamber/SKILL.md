@@ -47,8 +47,8 @@ Set `CHAMBER_MASTER_SECRET` yourself — never commit it, never share it.
 | SKU | What | Price |
 |-----|------|-------|
 | Chamber try | cloak new JSON | 24 hours free |
-| chamber-month | cloak license | $9/mo |
-| chamber-year | cloak license | $99/yr |
+| chamber-month | cloak license | $20/mo |
+| chamber-year | cloak license | $200/yr |
 | Open | already-sealed blob | keys only, no payment |
 
 Live prices: https://www.slidphilabs.com/chamber

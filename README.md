@@ -45,8 +45,8 @@ Hosted lab MCP (PCC + catalog): `POST https://www.slidphilabs.com/mcp` · Smithe
 | SKU | What | Price |
 |-----|------|-------|
 | Chamber try | cloak new JSON | 24 hours free |
-| Chamber month | cloak license | $9 |
-| Chamber year | cloak license | $99 |
+| Chamber month | cloak license | $20 |
+| Chamber year | cloak license | $200 |
 | Open | already-sealed blob | keys only |
 
 Prices live on https://www.slidphilabs.com/chamber
