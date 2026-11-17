@@ -19,6 +19,14 @@
  */
 
 import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 /** Exact text codes — Rider chamber set + Chamber-local reject.schema. */
 export type HopGateCode =
@@ -90,7 +98,15 @@ export type HopGateOptions = {
   /** @deprecated alias for seenHashes */
   seenNonces?: Set<string>;
   logAdmits?: boolean;
+  /**
+   * Durable append-only reject-log path (TSV, same shape as the live log).
+   * Default: ~/.chamber/reject.log. Set to null for in-memory only (tests).
+   */
+  logFile?: string | null;
 };
+
+/** Default durable reject-log path (KMS/CloudTrail match: survives restart). */
+export const DEFAULT_REJECT_LOG_FILE = join(homedir(), ".chamber", "reject.log");
 
 const DEFAULT_SEEN = new Set<string>();
 const REJECT_LOG: RejectLogEntry[] = [];
@@ -515,19 +531,82 @@ export function evaluateHopGate(
   return admitted;
 }
 
+function resolveLogFile(options?: HopGateOptions): string | null {
+  if (options && options.logFile !== undefined) return options.logFile;
+  return DEFAULT_REJECT_LOG_FILE;
+}
+
 /**
- * Append-only live reject log (mirrors chamber_log_reject / reject.log).
- * Line format: ISO\tcode\tpreview
+ * Create a directory if missing — WITHOUT recursive:true.
+ * Node's recursive mkdir can spin forever on pseudo-filesystems (/proc)
+ * where mkdir returns ENOENT: it keeps retrying the parent and never
+ * returns, which would hang the gate. Bounded manual recursion over path
+ * segments always terminates (each mkdir is a single syscall that returns
+ * promptly); any failure just means the entry stays in memory only.
+ */
+function ensureDir(dir: string): void {
+  if (existsSync(dir)) return;
+  const parent = dirname(dir);
+  if (parent !== dir) ensureDir(parent);
+  try {
+    mkdirSync(dir);
+  } catch {
+    // Unwritable / pseudo-filesystem — entry stays in memory only.
+  }
+}
+
+/**
+ * Append-only reject log (mirrors chamber_log_reject / reject.log).
+ * Line format: ISO\tcode\tpreview. Every reject is written to the durable
+ * file immediately (best-effort — a log failure never fails the gate).
  */
 export function appendRejectLog(
   entry: RejectLogEntry,
-  _options?: HopGateOptions
+  options?: HopGateOptions
 ): void {
-  REJECT_LOG.push({
+  const e: RejectLogEntry = {
     at: entry.at,
     code: entry.code,
     preview: entry.preview ?? "",
-  });
+  };
+  REJECT_LOG.push(e);
+  const file = resolveLogFile(options);
+  if (!file) return;
+  try {
+    ensureDir(dirname(file));
+    appendFileSync(file, formatRejectLogLine(e) + "\n", "utf8");
+  } catch {
+    // Audit logging must never fail the gate.
+  }
+}
+
+/**
+ * Load persisted reject-log entries into the live log (server startup /
+ * restart). Lines already in memory are skipped (dedup by exact TSV line).
+ * Returns the number of entries loaded. Never throws.
+ */
+export function loadPersistedRejectLog(logFile?: string | null): number {
+  const file = logFile === undefined ? DEFAULT_REJECT_LOG_FILE : logFile;
+  if (!file || !existsSync(file)) return 0;
+  let loaded = 0;
+  try {
+    const text = readFileSync(file, "utf8");
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      const parts = line.split("\t");
+      if (parts.length < 2) continue;
+      if (REJECT_LOG.some((e) => formatRejectLogLine(e) === line)) continue;
+      REJECT_LOG.push({
+        at: parts[0],
+        code: parts[1] as HopGateCode,
+        preview: parts.slice(2).join("\t"),
+      });
+      loaded++;
+    }
+  } catch {
+    // A corrupt/unreadable audit file must not kill startup.
+  }
+  return loaded;
 }
 
 /** Format one reject.log TSV line: ISO\tcode\tpreview */

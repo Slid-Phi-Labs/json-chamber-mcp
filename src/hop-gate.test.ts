@@ -5,8 +5,13 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   evaluateHopGate,
+  appendRejectLog,
+  loadPersistedRejectLog,
   listRejectLog,
   listRejectLogTsv,
   formatRejectLogLine,
@@ -16,6 +21,7 @@ import {
   formatScanChunkText,
   formatHopGateCode,
   sanitizePreview,
+  DEFAULT_REJECT_LOG_FILE,
   HOP_GATE_CODES,
   SCAN_CHUNK_HEADER,
   type HopGateOptions,
@@ -24,7 +30,9 @@ import {
 const fixedNow = () => new Date("2026-09-17T04:00:00.000Z");
 
 function opts(over: HopGateOptions = {}): HopGateOptions {
-  return { now: fixedNow, seenHashes: new Set(), ...over };
+  // logFile: null keeps the suite hermetic — unit-test rejects must not
+  // append to the production audit log (~/.chamber/reject.log).
+  return { now: fixedNow, seenHashes: new Set(), logFile: null, ...over };
 }
 
 function chunk(
@@ -264,5 +272,126 @@ describe("gate result wire", () => {
     assert.equal(JSON.stringify(r.code), '"admit"');
     // wire-facing value is the bare code, not a JSON object
     assert.equal(formatHopGateCode(r.code).includes("{"), false);
+  });
+});
+
+describe("durable reject log (KMS/CloudTrail match)", () => {
+  it("defaults to ~/.chamber/reject.log", () => {
+    assert.ok(DEFAULT_REJECT_LOG_FILE.endsWith(".chamber/reject.log"));
+  });
+
+  it("writes every reject to the file immediately, same TSV shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chamber-log-"));
+    try {
+      const file = join(dir, "reject.log");
+      const text = chunk(
+        {
+          url: "https://evil.example/",
+          etag: '"x"',
+          hash: "sha256:evil",
+          agent_id: "agt_sitescan",
+        },
+        ["smuggle=evil-blob-should-not-rehydrate"]
+      );
+      const r = evaluateHopGate(text, {
+        now: fixedNow,
+        seenHashes: new Set(),
+        logFile: file,
+      });
+      assert.equal(r.code, "reject.extra");
+      const body = readFileSync(file, "utf8");
+      const lines = body.trim().split("\n");
+      assert.equal(lines.length, 1);
+      const parts = lines[0].split("\t");
+      assert.equal(parts.length, 3);
+      assert.equal(parts[0], "2026-09-17T04:00:00Z");
+      assert.equal(parts[1], "reject.extra");
+      assert.ok(parts[2].includes("smuggle"));
+      assert.equal(parts[2].includes("evil-blob-should-not-rehydrate"), false);
+      // in-memory log and file agree
+      assert.equal(listRejectLog().length, 1);
+      assert.equal(formatRejectLogLine(listRejectLog()[0]), lines[0]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("survives a simulated restart: reset clears memory, load restores from file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chamber-log-"));
+    try {
+      const file = join(dir, "nested", "reject.log");
+      evaluateHopGate(null, {
+        now: fixedNow,
+        seenHashes: new Set(),
+        logFile: file,
+      });
+      evaluateHopGate("CUNI SettleHop\nhop_id=x\n", {
+        now: fixedNow,
+        seenHashes: new Set(),
+        logFile: file,
+      });
+      assert.equal(listRejectLog().length, 2);
+
+      // simulate a server restart: in-memory state is gone
+      resetHopGateState();
+      assert.equal(listRejectLog().length, 0);
+      assert.equal(listRejectLogTsv(), "");
+
+      const loaded = loadPersistedRejectLog(file);
+      assert.equal(loaded, 2);
+      const all = listRejectLog();
+      assert.equal(all.length, 2);
+      assert.deepEqual(
+        all.map((e) => e.code),
+        ["reject.empty", "reject.extra"]
+      );
+      assert.ok(listRejectLogTsv().includes("reject.empty"));
+      assert.ok(listRejectLogTsv().includes("reject.extra"));
+
+      // loading twice does not duplicate
+      assert.equal(loadPersistedRejectLog(file), 0);
+      assert.equal(listRejectLog().length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("logFile: null writes nothing to disk", () => {
+    const dir = mkdtempSync(join(tmpdir(), "chamber-log-"));
+    try {
+      const file = join(dir, "reject.log");
+      evaluateHopGate(null, {
+        now: fixedNow,
+        seenHashes: new Set(),
+        logFile: null,
+      });
+      assert.equal(existsSync(file), false);
+      assert.equal(listRejectLog().length, 1); // in-memory still records it
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("appendRejectLog to an unwritable path never throws", () => {
+    // Parent is a regular file, not a directory: mkdir/append fail fast
+    // with ENOTDIR. NOTE: do NOT use a /proc path here — Node's recursive
+    // mkdir spins forever on pseudo-filesystems (verified manually with
+    // `timeout 10 node -e mkdirSync('/proc/x', {recursive:true})` → hang),
+    // which is why the implementation uses a bounded manual ensureDir.
+    const dir = mkdtempSync(join(tmpdir(), "chamber-log-"));
+    try {
+      const blocker = join(dir, "blocker");
+      writeFileSync(blocker, "not a directory");
+      assert.doesNotThrow(() =>
+        appendRejectLog(
+          { at: "2026-09-17T04:00:00Z", code: "reject.empty", preview: "" },
+          { logFile: join(blocker, "reject.log") }
+        )
+      );
+      // in-memory log still holds the entry
+      assert.ok(listRejectLog().some((e) => e.code === "reject.empty"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

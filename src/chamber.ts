@@ -1,12 +1,24 @@
 /**
- * Chamber seal/open — AES-256-GCM + φ-split keyword shares (Format Spec v1).
+ * Chamber seal/open — AES-256-GCM + φ-split keyword shares (Format Spec v2).
+ *
+ * v2 custody model (KMS match): the session key is RANDOM per seal and is
+ * never derived from the master secret. It is split with φ-split into two
+ * 16-byte shares. The FIRST share (k_words) travels in the sealed blob; the
+ * SECOND share (r_words) is returned to the caller OUT OF BAND and is never
+ * embedded in the blob. Opening requires BOTH shares: the blob alone cannot
+ * be opened, and the master secret alone cannot open anything — there is no
+ * master input to open at all. The master secret remains the cloak-license
+ * identity only (see license.ts); it plays no role in the seal crypto.
+ *
+ * v1 blobs (both shares embedded, key derived from the master) are REJECTED,
+ * never silently opened — re-seal under v2. This is a breaking change.
+ *
  * No TRU8 residual engine.
  */
 
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   randomBytes,
 } from "node:crypto";
 
@@ -21,12 +33,11 @@ const WORDLIST = [
   "guard", "watch", "keep", "hold", "bind", "cast", "form", "rise",
 ] as const;
 
-const PHI_ROT = 21;
-const AAD = Buffer.from("chamber-v1");
+const WORD_INDEX = new Map<string, number>(WORDLIST.map((w, i) => [w, i]));
+const SHARE_WORDS = 24; // 16-byte share → 24 words (3 bytes → 4 words)
 
-function deriveSessionKey(master: Buffer): Buffer {
-  return createHash("sha256").update(master).update("chamber-phi-v1").digest();
-}
+const PHI_ROT = 21;
+const AAD = Buffer.from("chamber-v2");
 
 function phiSplit(key32: Buffer): [Buffer, Buffer] {
   const a = Buffer.alloc(16);
@@ -44,6 +55,26 @@ function phiSplit(key32: Buffer): [Buffer, Buffer] {
   return [a, rotated];
 }
 
+/**
+ * Inverse of phiSplit. rotated[i] carries the low 3 bits of b[i] in its top
+ * 3 bits and the top 5 bits of b[i-1] in its low 5 bits, so:
+ * b[i] = ((rotated[i+1] & 0x1f) << 3) | (rotated[i] >> 5).
+ */
+export function phiUnsplit(k: Buffer, rotated: Buffer): Buffer {
+  const b = Buffer.alloc(16);
+  for (let i = 0; i < 16; i++) {
+    b[i] = (((rotated[(i + 1) % 16] & 0x1f) << 3) | (rotated[i] >> 5)) & 0xff;
+  }
+  const key = Buffer.alloc(32);
+  for (let i = 0; i < 16; i++) {
+    key[i] = k[i];
+    key[i + 16] = b[i] ^ k[i];
+  }
+  return key;
+}
+
+export { phiSplit };
+
 function bytesToWords(data: Buffer): string {
   const pad = (3 - (data.length % 3)) % 3;
   const buf = Buffer.concat([data, Buffer.alloc(pad)]);
@@ -58,32 +89,63 @@ function bytesToWords(data: Buffer): string {
 }
 
 function wordsToBytes(text: string, expectedLen: number): Buffer {
-  const idx = new Map<string, number>(WORDLIST.map((w, i) => [w, i]));
   const parts = text.trim().split(/\s+/);
   const out: number[] = [];
   for (let i = 0; i + 3 < parts.length; i += 4) {
     let n = 0;
     for (let j = 0; j < 4; j++) {
-      n = (n << 6) | (idx.get(parts[i + j]) ?? 0);
+      n = (n << 6) | (WORD_INDEX.get(parts[i + j]) ?? 0);
     }
     out.push((n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff);
   }
   return Buffer.from(out).subarray(0, expectedLen);
 }
 
+/** Strict share decode: wrong word count or a word outside the list fails closed. */
+function decodeShare(text: unknown, what: string): Buffer {
+  if (typeof text !== "string" || !text.trim()) {
+    throw new Error(
+      `${what} required — the blob alone cannot be opened (two-share custody)`
+    );
+  }
+  const parts = text.trim().split(/\s+/);
+  if (parts.length !== SHARE_WORDS) {
+    throw new Error(
+      `invalid ${what}: expected ${SHARE_WORDS} words, got ${parts.length}`
+    );
+  }
+  for (const w of parts) {
+    if (!WORD_INDEX.has(w)) {
+      throw new Error(`invalid ${what}: word outside the share list: ${w}`);
+    }
+  }
+  return wordsToBytes(text, 16);
+}
+
 export type SealedBlob = {
   v: number;
   algo: string;
   k_words: string;
-  r_words: string;
+  /** v1 only — never present in v2. A blob carrying r_words is rejected. */
+  r_words?: string;
   nonce: string;
   tag: string;
   ct: string;
   orig_len: number;
 };
 
-export function chamberSeal(plaintext: Buffer, master: Buffer): SealedBlob {
-  const session = deriveSessionKey(master);
+export type SealResult = {
+  sealed: SealedBlob;
+  /**
+   * Second φ-share — returned OUT OF BAND, never embedded in the blob.
+   * Store it separately with the second custodian. The blob alone cannot
+   * be opened without it; anyone holding both shares can open.
+   */
+  secondShare: string;
+};
+
+export function chamberSeal(plaintext: Buffer): SealResult {
+  const session = randomBytes(32);
   const [k, r] = phiSplit(session);
   const nonce = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", session, nonce);
@@ -91,22 +153,37 @@ export function chamberSeal(plaintext: Buffer, master: Buffer): SealedBlob {
   const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const tag = cipher.getAuthTag();
   return {
-    v: 1,
-    algo: "chamber-aes256gcm-phi",
-    k_words: bytesToWords(k),
-    r_words: bytesToWords(r),
-    nonce: nonce.toString("hex"),
-    tag: tag.toString("hex"),
-    ct: ct.toString("base64"),
-    orig_len: plaintext.length,
+    sealed: {
+      v: 2,
+      algo: "chamber-aes256gcm-phi",
+      k_words: bytesToWords(k),
+      nonce: nonce.toString("hex"),
+      tag: tag.toString("hex"),
+      ct: ct.toString("base64"),
+      orig_len: plaintext.length,
+    },
+    secondShare: bytesToWords(r),
   };
 }
 
-export function chamberOpen(sealed: SealedBlob, master: Buffer): Buffer {
-  if (sealed.algo !== "chamber-aes256gcm-phi" || sealed.v !== 1) {
+export function chamberOpen(sealed: SealedBlob, secondShare: string): Buffer {
+  if (!sealed || typeof sealed !== "object") {
+    throw new Error("sealed object required");
+  }
+  if (sealed.v === 1) {
+    throw new Error(
+      "chamber v1 blob rejected — re-seal under v2 (two-share custody); v1 blobs are never opened"
+    );
+  }
+  if (sealed.algo !== "chamber-aes256gcm-phi" || sealed.v !== 2) {
     throw new Error("unsupported chamber format");
   }
-  const key = deriveSessionKey(master);
+  if (sealed.r_words !== undefined) {
+    throw new Error("v2 blob must not carry r_words — re-seal under v2");
+  }
+  const k = decodeShare(sealed.k_words, "first share (k_words)");
+  const r = decodeShare(secondShare, "second share");
+  const key = phiUnsplit(k, r);
   const nonce = Buffer.from(sealed.nonce, "hex");
   const tag = Buffer.from(sealed.tag, "hex");
   const ct = Buffer.from(sealed.ct, "base64");

@@ -2,10 +2,10 @@
 /**
  * json-chamber-mcp — Chamber MCP Server
  * Cloak needs a live license (24h try, then $9/mo · $99/yr).
- * Open is both keys, no extra payment. Ciphertext does not expire.
+ * Open is both shares (blob k_words + caller-held second share), no license, no clock.
+ * Ciphertext does not expire. v1 blobs are rejected — re-seal under v2.
  */
 
-import { createHash } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -23,23 +23,14 @@ import {
   evaluateHopGate,
   formatHopGateCode,
   listRejectLogTsv,
+  loadPersistedRejectLog,
   type HopGateOptions,
 } from "./hop-gate.js";
 
 const licenseMgr = new LicenseManager();
 
-function getMaster(): Buffer {
-  const raw =
-    process.env.CHAMBER_MASTER_SECRET ||
-    process.env.JSON_CHAMBER_MASTER ||
-    process.env.TRU8_MASTER_SECRET ||
-    "chamber-demo-master-secret-32b!!";
-  const b = Buffer.from(raw, "utf8");
-  return b.length >= 32 ? b : createHash("sha256").update(b).digest();
-}
-
 const server = new Server(
-  { name: "json-chamber-mcp", version: "1.2.0" },
+  { name: "json-chamber-mcp", version: "2.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -57,7 +48,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "chamber_cloak",
-      description: "Seal JSON/text with φ-split + AES-256-GCM. Requires live license.",
+      description:
+        "Seal JSON/text with φ-split + AES-256-GCM (v2). Requires live license. " +
+        "Returns the sealed blob AND a second share out-of-band: the blob alone cannot be opened. " +
+        "Store second_share separately with the second custodian.",
       inputSchema: {
         type: "object",
         properties: {
@@ -69,13 +63,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "chamber_open",
-      description: "Open a sealed chamber blob. Keys only — no license, no clock.",
+      description:
+        "Open a sealed chamber blob. Requires the blob AND the second share returned at cloak time. " +
+        "Neither alone opens anything. Keys only — no license, no clock. v1 blobs are rejected.",
       inputSchema: {
         type: "object",
         properties: {
-          sealed: { type: "object", description: "Sealed blob from chamber_cloak" },
+          sealed: { type: "object", description: "Sealed blob from chamber_cloak (v2)" },
+          second_share: { type: "string", description: "Second φ-share returned by chamber_cloak (24 words)" },
         },
-        required: ["sealed"],
+        required: ["sealed", "second_share"],
       },
     },
     {
@@ -103,7 +100,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "chamber_hop_reject_log",
       description:
-        "Live hop-gate reject.log as TSV ISO\\tcode\\tpreview (Rider SoT). Extra values never rehydrate.",
+        "Durable hop-gate reject.log as TSV ISO\\tcode\\tpreview (Rider SoT). " +
+        "Persisted to ~/.chamber/reject.log — survives a server restart. Extra values never rehydrate.",
       inputSchema: {
         type: "object",
         properties: {
@@ -142,7 +140,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           type: "text",
           text: JSON.stringify({
             package: "json-chamber-mcp",
-            version: "1.2.0",
+            version: "2.0.0",
             product: "json-chamber",
             lab: "Slid Phi Labs",
             pricing: {
@@ -175,15 +173,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           throw new Error("data is not valid JSON (set is_json=false for plain text)");
         }
       }
-      const sealed = chamberSeal(Buffer.from(dataStr, "utf8"), getMaster());
+      const { sealed, secondShare } = chamberSeal(Buffer.from(dataStr, "utf8"));
       return {
-        content: [{ type: "text", text: JSON.stringify(sealed, null, 2) }],
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            sealed,
+            second_share: secondShare,
+            custody:
+              "two-share — the sealed blob alone cannot be opened. Store second_share separately with the second custodian; anyone holding both shares can open.",
+          }, null, 2),
+        }],
       };
     }
     if (name === "chamber_open") {
       const sealed = a.sealed as SealedBlob;
+      const secondShare = a.second_share;
       if (!sealed || typeof sealed !== "object") throw new Error("sealed object required");
-      const opened = chamberOpen(sealed, getMaster());
+      if (typeof secondShare !== "string" || !secondShare.trim()) {
+        throw new Error("second_share required — the blob alone cannot be opened (two-share custody)");
+      }
+      const opened = chamberOpen(sealed, secondShare);
       const text = opened.toString("utf8");
       let parsed: unknown = text;
       try { parsed = JSON.parse(text); } catch { /* plain */ }
@@ -225,6 +235,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  // Durable audit log: entries written by earlier processes are visible to
+  // chamber_hop_reject_log from this process onward. Never throws.
+  loadPersistedRejectLog();
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
