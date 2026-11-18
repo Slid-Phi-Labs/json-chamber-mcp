@@ -51,6 +51,36 @@ Hosted lab MCP (PCC + catalog): `POST https://www.slidphilabs.com/mcp` · Smithe
 
 Prices live on https://www.slidphilabs.com/chamber
 
+## License recovery
+
+Cloak needs a live license: either the 24-hour trial from first run or a
+signed purchased license (`license.json` with `purchased: true`, HMAC-signed
+under your `CHAMBER_MASTER_SECRET`). A purchase never comes from an API key
+or key value — no key substring unlocks cloak.
+
+`~/.chamber` is created mode `0700` and `license.json` / `KILLED` are mode
+`0600`, so other local processes cannot kill or corrupt your license. A
+master secret must be configured (`CHAMBER_MASTER_SECRET`, or
+`JSON_CHAMBER_MASTER` / `TRU8_MASTER_SECRET`); without one the gate fails
+closed — cloak stays off and no license file is written. There is no
+default or demo secret.
+
+If cloak reports dead (`KILLED` marker present, e.g. the trial expired or
+a license signature mismatch was detected):
+
+1. **Purchase revives automatically.** Installing a valid signed purchased
+   `license.json` clears the `KILLED` marker on the next check — no manual
+   step needed.
+2. **Manual recovery.** Delete the marker (and, to restart a fresh 24-hour
+   trial, the license file too):
+   ```bash
+   rm ~/.chamber/KILLED ~/.chamber/license.json
+   ```
+   The next `chamber_status` / `chamber_cloak` starts a new trial. A
+   tamper kill (signature mismatch) stays in force for trial licenses
+   until a purchase lands or the marker is deleted by hand — replacing the
+   license file alone does not clear it.
+
 ## Tools
 
 | Tool | Purpose |
@@ -61,6 +91,41 @@ Prices live on https://www.slidphilabs.com/chamber
 | `chamber_open` | open sealed blob (keys only) |
 | `chamber_hop_gate` | admit/reject hop (gate only) |
 | `chamber_hop_reject_log` | live sanitized reject log |
+| `chamber_lease_export` | export as ciphertext + key lease (#25) |
+| `chamber_lease_decrypt` | decrypt via revocation service (#25) |
+| `chamber_lease_revoke` | revoke a lease — all copies go dark (#25) |
+| `chamber_lease_renew` / `chamber_lease_status` | lease renewal / status (#25) |
+| `chamber_transparency_seal` | seal + append content hash to log (#31) |
+| `chamber_transparency_open` | verified read, refused unless proven (#31) |
+| `chamber_transparency_status` / `chamber_transparency_verify` | log head / proof check (#31) |
+
+## Batch 4 features (2026-11-18)
+
+- **#33 Erasure receipts** — library API (`src/erasure.ts`): `CopyRegistry` +
+  `InMemoryCopyLocation`. Deleting a record returns a signed receipt
+  enumerating every registered copy location (primary, fragment, backup,
+  snapshot, cache, index, derived) with a probe-verified removal attestation
+  from each, or a signed retention-lock statement with the exact expiry date.
+  A location that does not answer, or whose removal an independent probe
+  contradicts, is an open item and the receipt is marked incomplete. Chamber
+  MCP holds no copy store of its own, so there is deliberately no MCP tool
+  for this — the host application registers its real locations.
+- **#25 Key-lease revocation** — `src/key-lease.ts` + MCP tools
+  `chamber_lease_*`. Exports leave as ciphertext + a short-lived lease; the
+  recipient never holds the key (the DEK is wrapped under a key that lives
+  only in the revocation service). Revocation is one act
+  (`chamber_lease_revoke`); every copy goes dark at lease expiry. Leases are
+  in-memory: a server restart drops all leases, which fails closed.
+- **#31 Transparency-log-verified reads** — `src/transparency-log.ts` +
+  MCP tools `chamber_transparency_*`. OPTIONAL mode, default OFF: plain
+  `chamber_cloak` / `chamber_open` never consult the log.
+  `chamber_transparency_seal` appends the SHA-256 content hash to an
+  append-only Merkle log (Ed25519-signed tree head) and returns a signed
+  inclusion promise; `chamber_transparency_open` recomputes the hash and
+  requires an inclusion proof against the signed tree head — absent hash or
+  forked log = read refused. Measured added read latency ≈ 1–4 ms
+  (Ed25519 sign+verify), flat in log size. Log + keypair persist under
+  `~/.chamber/transparency-log*.json`.
 
 
 ## Hop-gate (ScanChunk / Rider SoT)

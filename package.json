@@ -12,7 +12,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "prepare": "npm run build",
-    "test": "tsx --test src/hop-gate.test.ts src/chamber.test.ts"
+    "test": "tsx --test src/hop-gate.test.ts src/chamber.test.ts src/batch4.test.ts src/license.test.ts"
   },
   "keywords": [
     "mcp",

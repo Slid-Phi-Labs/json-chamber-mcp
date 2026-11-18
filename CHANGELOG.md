@@ -1,5 +1,20 @@
 # Changelog — json-chamber-mcp
 
+## Unreleased — Batch 4 (2026-11-18): erasure receipts, key leases, transparency log
+
+- **#33 Erasure receipts** (`src/erasure.ts`, `src/signing.ts`): signed
+  receipts enumerating every copy location with probe-verified removal
+  attestations or signed retention-lock statements with exact expiry;
+  no-answer / unverified locations are open items, receipt incomplete.
+  Library API — no MCP tool (Chamber holds no copy store).
+- **#25 Key-lease revocation** (`src/key-lease.ts`): leased exports,
+  revocation service, one-act revoke; MCP tools `chamber_lease_*`.
+- **#31 Transparency-log-verified reads** (`src/transparency-log.ts`):
+  opt-in Merkle log with Ed25519-signed tree heads; verified reads refuse
+  absent/forked content; default OFF; MCP tools `chamber_transparency_*`.
+  Measured added read latency ≈ 1–4 ms, flat in log size.
+- Tests: 38 → 55 passing (`src/batch4.test.ts`, 17 new).
+
 ## Unreleased — v2 custody + durable audit (KMS match)
 
 Closes the two gaps where AWS KMS beat Chamber in the 2026-11-17
